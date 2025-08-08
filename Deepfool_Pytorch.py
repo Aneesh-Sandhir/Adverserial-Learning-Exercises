@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 class DeepFool_pytorch:
     
-    def __init__(self, image, label, epsilon = .2, itterations = 200, overshoot = .02):
+    def __init__(self, image, label, epsilon = .2, itterations = 50, overshoot = .02):
         """
         Initializes the necessary inputs image, ground truth label, model, and 
         list of classes and performs a projected gradient decent attack to fool
@@ -49,9 +49,10 @@ class DeepFool_pytorch:
                 
         self.least_noisy_fooling_image = None
         self.least_noisy_top5_image = None
-        self.confidence_label_vector = torch.zeros(self.itterations)
-        self.confidence_prediction_vector = torch.zeros(self.itterations)
-        self.confidence_top5_vector = torch.zeros(self.itterations)
+        
+        self.confidence_label_vector = torch.zeros(self.itterations + 1)
+        self.confidence_prediction_vector = torch.zeros(self.itterations + 1)
+        self.confidence_top5_vector = torch.zeros(self.itterations + 1)
         self.deep_fool(itterations, overshoot)
 
     def deep_fool(self, itterations, overshoot, class_count = 10):    
@@ -82,6 +83,11 @@ class DeepFool_pytorch:
         
         perturbed_predictions = self.pytorch_model.forward(perturbed_image)
         perturbed_predictions = torch.nn.functional.softmax(perturbed_predictions, dim = 1) 
+        confidences, class_indicies = torch.sort(perturbed_predictions, descending = True)
+
+        self.confidence_prediction_vector[0] = confidences[0, 0]
+        self.confidence_top5_vector[0] = confidences[0, 4]
+        self.confidence_label_vector[0] = perturbed_predictions[0, neighborhood[0]]
         
         for itteration in range(itterations):
             minimum_perturbation = torch.inf
@@ -111,9 +117,15 @@ class DeepFool_pytorch:
             perturbed_predictions = torch.nn.functional.softmax(perturbed_predictions, dim = 1) 
             confidences, class_indicies = torch.sort(perturbed_predictions, descending = True)
         
-            self.confidence_prediction_vector[itteration] = confidences[0, 0]
-            self.confidence_top5_vector[itteration] = confidences[0, 4]
-            self.confidence_label_vector[itteration] = perturbed_predictions[0, neighborhood[0]].max()
+            self.confidence_prediction_vector[itteration + 1] = confidences[0, 0]
+            self.confidence_top5_vector[itteration + 1] = confidences[0, 4]
+            self.confidence_label_vector[itteration + 1] = perturbed_predictions[0, neighborhood[0]].max()
+            
+            if ((class_indicies[0, 0] != neighborhood[0]) & (self.least_noisy_fooling_image == None)):
+                self.set_least_noisy_fooling_image(perturbed_image)
+            
+            if ((confidences[0, 4] > perturbed_predictions[0, neighborhood[0]]) & (self.least_noisy_top5_image == None)):
+                self.set_least_noisy_top5_image(perturbed_image)
             
         total_perterbations = (1 + overshoot) * total_perterbations
 
@@ -276,6 +288,17 @@ if __name__ == "__main__":
     
     attack = DeepFool_pytorch(image, image_label)
     
-    plt.plot(range(attack.itterations), attack.confidence_prediction_vector, label = 'Prediction Confidence')
-    plt.plot(range(attack.itterations), attack.confidence_top5_vector, label = 'Top 5 Confidence')
-    plt.plot(range(attack.itterations), attack.confidence_label_vector, label = 'Labeled Class Confidence')
+    fooled = (torch.Tensor(attack.confidence_label_vector - attack.confidence_prediction_vector) == 0).nonzero(as_tuple=True)[0][-1]
+    not_top_5 = (torch.Tensor(attack.confidence_label_vector - attack.confidence_top5_vector) < 0).nonzero(as_tuple=True)[0][0]
+    
+    attack.plot_image(attack.image, 'Original Image')
+    attack.plot_image(attack.image_tensor, 'Input Image')
+    
+    plt.ylabel('Confidence')
+    plt.xlabel('Itterations')
+    
+    plt.plot(torch.linspace(0, attack.itterations, attack.itterations + 1), attack.confidence_prediction_vector.detach(), label = 'Prediction Confidence')
+    plt.plot(torch.linspace(0, attack.itterations, attack.itterations + 1), attack.confidence_top5_vector.detach(), label = 'Top 5 Confidence')
+    plt.plot(torch.linspace(0, attack.itterations, attack.itterations + 1), attack.confidence_label_vector.detach(), label = 'Labeled Class Confidence')
+    plt.scatter([fooled, not_top_5], [attack.confidence_label_vector.detach()[fooled], attack.confidence_label_vector.detach()[not_top_5]], color = 'red')
+    
