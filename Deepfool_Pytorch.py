@@ -11,12 +11,12 @@ from torchvision import transforms
 from PIL import Image
 import requests
 import copy
-
+from tqdm import trange 
 import matplotlib.pyplot as plt
 
 class DeepFool_pytorch:
     
-    def __init__(self, image, label, epsilon = .2, itterations = 50, overshoot = .02):
+    def __init__(self, image, label, epsilon = .2, itterations = 50, overshoot = .002):
         """
         Initializes the necessary inputs image, ground truth label, model, and 
         list of classes and performs a projected gradient decent attack to fool
@@ -89,7 +89,7 @@ class DeepFool_pytorch:
         self.confidence_top5_vector[0] = confidences[0, 4]
         self.confidence_label_vector[0] = perturbed_predictions[0, neighborhood[0]]
         
-        for itteration in range(itterations):
+        for itteration in trange(itterations):
             minimum_perturbation = torch.inf
             perturbed_predictions[0, neighborhood[0]].backward(retain_graph = True)
             gradient_datum = perturbed_image.grad.data.detach().clone()
