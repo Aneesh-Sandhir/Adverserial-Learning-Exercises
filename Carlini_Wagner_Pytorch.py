@@ -25,9 +25,9 @@ import matplotlib.pyplot as plt
 
 class CarliniWagner_pytorch:
     
-    def __init__(self, image, label, targeted = False, confidence = 0,
+    def __init__(self, image, label, targeted = False, target = None, 
                  learning_rate = 0.01, initial_constant = 0.001,
-                 binary_search_steps = 1, max_itterations = 50, 
+                 binary_search_steps = 1, max_itterations = 50, confidence = 0, 
                  abort_early = False):
         """
         Initializes the necessary inputs image, ground truth label, model, and 
@@ -50,6 +50,7 @@ class CarliniWagner_pytorch:
         self.image_tensor = self.prepare_image(self.image)
         
         self.targeted = targeted 
+        self.target = None
         self.confidence = confidence
         self.learning_rate = learning_rate
         self.initial_constant = initial_constant
@@ -62,6 +63,8 @@ class CarliniWagner_pytorch:
         model_categories_url = 'https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt'
         self.model_categories = requests.get(model_categories_url).text.split('\n')
         self.label = torch.Tensor([self.model_categories.index(label)]).int()
+        if self.targeted:
+            self.target = torch.Tensor([self.model_categories.index(target)]).int()
 
         self.original_prediction = self.make_prediction(self.image_tensor)
                 
@@ -69,16 +72,21 @@ class CarliniWagner_pytorch:
         self.least_noisy_top5_image = None
         
         self.confidence_label_vector = torch.zeros(self.max_itterations)
+        self.confidence_target_vector = torch.zeros(self.max_itterations)
         self.confidence_prediction_vector = torch.zeros(self.max_itterations)
         self.confidence_top5_vector = torch.zeros(self.max_itterations)
-        self.adverserial_image = self.carlini_wagner(self.pytorch_model, self.image_tensor, self.label)
+        self.adverserial_image = self.carlini_wagner(self.pytorch_model, self.image_tensor, self.label, self.target)
 
-    def carlini_wagner(self, model, inputs, labels):    
+    def carlini_wagner(self, model, inputs, labels, target):    
+        
+        if self.targeted:
+            original_labels = labels
+            labels = target
         
         batch_size = len(inputs)
         batch_view = lambda tensor: tensor.view(batch_size,  *[1] * (inputs.dim() - 1))
         tanh_inputs = torch.atanh((1 - 1e-6) * (2 * inputs - 1))
-        multiplier = 1 if self.targeted else 1
+        multiplier = -1 if self.targeted else 1
         
         c = torch.full((batch_size, ), self.initial_constant)
         lowerbound = torch.zeros_like(c)
@@ -133,8 +141,16 @@ class CarliniWagner_pytorch:
                 confidences, classes = torch.sort(torch.nn.functional.softmax(model(adv_inputs)), descending = True)
                 self.confidence_prediction_vector[i] = confidences[0, 0]
                 self.confidence_top5_vector[i] = confidences[0, 5]
-                label_index = (classes == labels[0]).nonzero(as_tuple = True)[-1]
-                self.confidence_label_vector[i] = confidences[0, label_index]
+                
+                if self.targeted:
+                    label_index = (classes == labels[0]).nonzero(as_tuple = True)[-1]
+                    self.confidence_target_vector[i] = confidences[0, label_index]
+                    original_label_index = (classes == original_labels[0]).nonzero(as_tuple = True)[-1]
+                    self.confidence_label_vector[i] = confidences[0, original_label_index]
+                else:
+                    label_index = (classes == labels[0]).nonzero(as_tuple = True)[-1]
+                    self.confidence_label_vector[i] = confidences[0, label_index]
+                
                 #print(f'{self.model_categories[classes[0, 0]]} confidence {confidences[0,0]: .4f}')
                 #print(f'{self.model_categories[classes[0, label_index]]} confidence {confidences[0, label_index]: .4f}')
                 
@@ -314,7 +330,7 @@ class CarliniWagner_pytorch:
 if __name__ == "__main__":
     image_url = 'https://storage.googleapis.com/download.tensorflow.org/example_images/YellowLabradorLooking_new.jpg'
     image = Image.open(requests.get(image_url, stream = True).raw)
-    image_label = 'Saluki'
+    image_label = 'Saluki' # model already misclassifies this image becasue of how CW attack needs the image scaled
     
     attack = CarliniWagner_pytorch(image, image_label)
     
@@ -326,7 +342,23 @@ if __name__ == "__main__":
     plt.ylabel('Confidence')
     plt.xlabel('Itterations')
     
-    plt.plot(torch.linspace(1, attack.max_itterations, attack.max_itterations), attack.confidence_prediction_vector.detach(), label = 'Prediction Confidence')
-    plt.plot(torch.linspace(1, attack.max_itterations, attack.max_itterations), attack.confidence_top5_vector.detach(), label = 'Top 5 Confidence')
-    plt.plot(torch.linspace(1, attack.max_itterations, attack.max_itterations), attack.confidence_label_vector.detach(), label = 'Labeled Class Confidence')
+    itteration_vector = torch.linspace(1, attack.max_itterations, attack.max_itterations)
+    plt.plot(itteration_vector, attack.confidence_prediction_vector.detach(), label = 'Prediction Confidence')
+    plt.plot(itteration_vector, attack.confidence_top5_vector.detach(), label = 'Top 5 Confidence')
+    plt.plot(itteration_vector, attack.confidence_label_vector.detach(), label = 'Labeled Class Confidence')
+    plt.show()
     
+    target_label = 'hare'
+    image_label = 'Labrador retriever'
+    hareOfTheDog = CarliniWagner_pytorch(image, image_label, targeted = True, 
+                                         target = target_label, max_itterations = 50, 
+                                         learning_rate = .01, initial_constant = 0.1)
+    fooled = (torch.Tensor(hareOfTheDog.confidence_target_vector - hareOfTheDog.confidence_prediction_vector) == 0).nonzero(as_tuple=True)[0][0]
+    
+    itteration_vector = torch.linspace(1, hareOfTheDog.max_itterations, hareOfTheDog.max_itterations)
+    plt.plot(itteration_vector, hareOfTheDog.confidence_prediction_vector.detach(), label = 'Prediction Confidence')
+    plt.plot(itteration_vector, hareOfTheDog.confidence_top5_vector.detach(), label = 'Top 5 Confidence')
+    plt.plot(itteration_vector, hareOfTheDog.confidence_label_vector.detach(), label = 'Labeled Class Confidence')
+    plt.plot(itteration_vector, hareOfTheDog.confidence_target_vector.detach(), label = 'Target Class Confidence')
+    plt.legend()
+    plt.scatter([fooled + 1], [hareOfTheDog.confidence_target_vector.detach()[fooled]], color = 'red')
