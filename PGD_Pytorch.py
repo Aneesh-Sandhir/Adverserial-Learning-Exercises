@@ -10,8 +10,12 @@ from torchvision import transforms
 
 from PIL import Image
 import requests
+import io
+from tqdm import trange
 
 import matplotlib.pyplot as plt
+import IPython.display
+import numpy as np
 
 class PGD_pytorch:
     
@@ -38,7 +42,7 @@ class PGD_pytorch:
         self.label = label
         
         # model specific attributes
-        self.pytorch_model = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', weights=True).eval()
+        self.mobilenetv2 = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', weights=True).eval()
         model_categories_url = 'https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt'
         self.model_categories = requests.get(model_categories_url).text.split('\n')
         
@@ -53,7 +57,11 @@ class PGD_pytorch:
         self.confidence_label_vector = torch.zeros(self.itterations)
         self.confidence_prediction_vector = torch.zeros_like(self.epsilons)
         self.confidence_top5_vector = torch.zeros_like(self.epsilons)
+        self.grad_cam_gif = []
+        
         self.prjected_gradient_descent(epsilon, itterations)
+        self.grad_cam_gif[0].save("PGD_grad_cam.gif", save_all = True, append_images = self.grad_cam_gif[1:], duration=100, loop=0)
+        
 
     def prjected_gradient_descent(self, epsilon, itterations):    
         """
@@ -74,11 +82,13 @@ class PGD_pytorch:
         
         augmented_image = self.image_tensor.clone().detach()
         
-        for index, step in enumerate(range(itterations)):
+        for index in trange(itterations):
             #run inference while recording gradients
             augmented_image.requires_grad_()
-            model_output = self.pytorch_model(augmented_image)
+            self.grad_cam_gif.append(self.grad_CAM(augmented_image))
+            model_output = self.mobilenetv2(augmented_image)
             prediction = torch.nn.functional.softmax(model_output[0], dim = 0)
+            
                 
             self.confidence_label_vector[index] = prediction[category_index]
             ordered_output, indicies = torch.sort(prediction, descending = True)
@@ -144,7 +154,7 @@ class PGD_pytorch:
             
         """
         with torch.no_grad():
-            model_output = self.pytorch_model(image_tensor)
+            model_output = self.mobilenetv2(image_tensor)
         prediction = torch.nn.functional.softmax(model_output[0], dim = 0)
         
         return prediction 
@@ -168,7 +178,7 @@ class PGD_pytorch:
 
         """
         preprocessing = transforms.Compose([
-            transforms.Resize((224, 244)),
+            transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
@@ -231,6 +241,66 @@ class PGD_pytorch:
     def set_least_noisy_top5_image(self, image):
         
         self.least_noisy_top5_image = image
+        
+    
+    def grad_CAM(self, input_image):
+        
+        cam_image = input_image.clone().detach()
+        activations = []
+        gradients = []
+        target_layer = self.mobilenetv2.features[-1]
+        
+        def forward_hook(module, input, output):
+            activations.append(output)
+
+        def backward_hook(module, grad_input, grad_output):
+            gradients.append(grad_output[0])
+        
+        forward_handle = target_layer.register_forward_hook(forward_hook)
+        backward_handle = target_layer.register_full_backward_hook(backward_hook)
+        
+        output = self.mobilenetv2(cam_image)
+        predicted_class_index = torch.argmax(output)
+        
+        self.mobilenetv2.zero_grad()
+        output[0, predicted_class_index].backward()
+        
+        # Get hooked activations and gradients
+        act = activations[0].squeeze(0)     # Shape: [C, H, W]
+        grad = gradients[0].squeeze(0)      # Shape: [C, H, W]
+        
+        # Compute weights: average gradient for each channel
+        weights = grad.mean(dim=(1, 2))     # Shape: [C]
+        
+        # Weighted sum of activations
+        cam = torch.zeros(act.shape[1:], dtype=torch.float32)  # Shape: [H, W]
+        for i, w in enumerate(weights):
+            cam += w * act[i]
+        
+        # ReLU and normalize
+        cam = torch.relu(cam)
+        cam -= cam.min()
+        cam /= cam.max()
+        
+        display_image = self.image.resize(cam_image.shape[-2:])
+        plt.imshow(display_image)
+        
+        cam = cam.detach().numpy()
+        cam = np.uint8(255 * cam)
+        cam = Image.fromarray(cam).resize(cam_image.shape[-2:], resample=Image.BILINEAR)
+        cam = np.array(cam)
+        
+        plt.imshow(cam, cmap='jet', alpha=.50)  # Alpha for transparency
+        plt.title(f"Grad-CAM for Class: {self.model_categories[predicted_class_index.item()]}")
+        plt.axis('off')
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        plt.close()
+        buf.seek(0)
+        cam = Image.open(buf)
+
+        return cam
     
     def plot_image(self, display_image, title = None):
         """
@@ -279,3 +349,5 @@ if __name__ == "__main__":
     plt.plot(range(len(attack.epsilons)), attack.confidence_top5_vector, label = 'Top 5 Confidence')
     plt.plot(range(len(attack.epsilons)), attack.confidence_label_vector, label = 'Labeled Class Confidence')
     plt.scatter([fooled, not_top_5], [attack.confidence_label_vector[fooled], attack.confidence_label_vector[not_top_5]], color = 'red')
+    
+    
