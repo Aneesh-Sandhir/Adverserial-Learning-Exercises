@@ -17,13 +17,14 @@ import requests
 import copy
 from tqdm import trange
 
+import numpy as np
 import matplotlib.pyplot as plt
 
 class CarliniWagner_Mobilenetv2(Attack):
     
     def __init__(self, image, label, targeted = False, target = None, 
                      learning_rate = 0.01, initial_constant = 0.001,
-                     binary_search_steps = 1, max_itterations = 50, confidence = 0, 
+                     binary_search_steps = 5, max_itterations = 51, confidence = 0, 
                      abort_early = False):
         super().__init__(image, label)
         
@@ -38,8 +39,11 @@ class CarliniWagner_Mobilenetv2(Attack):
         self.abort_early = abort_early
         if self.targeted:
             self.target = torch.Tensor([self.model_categories.index(target)]).int()
+            
+        self.label = torch.Tensor([self.model_categories.index(label)]).int()
         
         # initialize confidence vectors
+        self.itterations_vector = torch.linspace(0, self.max_itterations - 1, self.max_itterations)
         self.confidence_label_vector = torch.zeros(self.max_itterations)
         self.confidence_target_vector = torch.zeros(self.max_itterations)
         self.confidence_prediction_vector = torch.zeros(self.max_itterations)
@@ -47,7 +51,7 @@ class CarliniWagner_Mobilenetv2(Attack):
 
         # perform attack
         self.adverserial_image = self.carlini_wagner(self.image_tensor, self.label, self.target)
-        self.grad_cam_gif[0].save("CW_grad_cam.gif", save_all = True, 
+        self.grad_cam_gif[0].save("Animations/CW_grad_cam.gif", save_all = True, 
                                   append_images = self.grad_cam_gif[1:], duration=100, loop=0)
         
     def carlini_wagner(self, inputs, labels, target):    
@@ -87,7 +91,7 @@ class CarliniWagner_Mobilenetv2(Attack):
         outer_best_adv = inputs.clone()
         outer_adv_found = torch.zeros(batch_size, dtype = torch.bool)
         
-        for outer_step in range(self.binary_search_steps):
+        for outer_step in trange(self.binary_search_steps, leave = True):
             modifier = torch.zeros_like(inputs, requires_grad = True)
             optimizer = optim.Adam([modifier], lr = self.learning_rate)
             best_l2 = torch.full_like(c, torch.inf)
@@ -97,11 +101,12 @@ class CarliniWagner_Mobilenetv2(Attack):
                 c = upperbound
         
             prev = torch.inf
-            for i in trange(self.max_itterations):
+            self.grad_cam_gif = []
+            for i in trange(self.max_itterations, leave = False):
                 adv_inputs = (torch.tanh(tanh_inputs + modifier) + 1)/2
                 l2_squared = (adv_inputs - inputs).flatten(1).square().sum(1)
                 l2 = l2_squared.detach().sqrt()
-                logits = self.pytorch_model(adv_inputs)
+                logits = self.mobilenetv2(adv_inputs)
         
                 if (outer_step == 0) & (i == 0):
                     oh_labels = torch.zeros_like(logits).scatter_(1, labels.unsqueeze(1).long(), 1)
@@ -126,20 +131,35 @@ class CarliniWagner_Mobilenetv2(Attack):
                 outer_best_l2 = torch.where(outer_is_both, l2, outer_best_l2)
                 outer_adv_found.logical_or_(outer_is_both)
                 outer_best_adv = torch.where(batch_view(outer_is_both), adv_inputs.detach(), outer_best_adv)
+                confidences, classes = torch.sort(torch.nn.functional.softmax(self.mobilenetv2(adv_inputs), dim = 1),
+                                                  descending = True)
                 
-                confidences, classes = torch.sort(torch.nn.functional.softmax(self.pytorch_model(adv_inputs)), descending = True)
                 self.confidence_prediction_vector[i] = confidences[0, 0]
-                self.confidence_top5_vector[i] = confidences[0, 5]
-                
+                self.confidence_top5_vector[i] = confidences[0, 4]                
+                self.grad_cam_gif.append(self.grad_CAM(adv_inputs))
                 if self.targeted:
                     label_index = (classes == labels[0]).nonzero(as_tuple = True)[-1]
                     self.confidence_target_vector[i] = confidences[0, label_index]
                     original_label_index = (classes == original_labels[0]).nonzero(as_tuple = True)[-1]
                     self.confidence_label_vector[i] = confidences[0, original_label_index]
+                    
+                    # save the least noisy images which are misclassified 
+                    if ((classes[0, 0] != original_labels[0]) & (self.least_noisy_fooling_image == None)):
+                        self.set_least_noisy_fooling_image(outer_best_adv)
+                    
+                    if ((confidences[0, 4] > confidences[0, original_labels[0]]) & (self.least_noisy_top5_image == None)):
+                        self.set_least_noisy_top5_image(outer_best_adv)
                 else:
                     label_index = (classes == labels[0]).nonzero(as_tuple = True)[-1]
                     self.confidence_label_vector[i] = confidences[0, label_index]
-                
+                    
+                    # save the least noisy images which are misclassified 
+                    if ((classes[0, 0] != labels[0]) & (self.least_noisy_fooling_image == None)):
+                        self.set_least_noisy_fooling_image(outer_best_adv)
+                    
+                    if ((confidences[0, 4] > confidences[0, labels[0]]) & (self.least_noisy_top5_image == None)):
+                        self.set_least_noisy_top5_image(outer_best_adv)
+
                 class_logits = logits.gather(1, labels.unsqueeze(1).long()).squeeze(1)
                 other_logits = (logits - infh_labels).amax(dim = 1)
                 logits_dist = multiplier * (class_logits - other_logits)
@@ -192,11 +212,11 @@ class CarliniWagner_Mobilenetv2(Attack):
 if __name__ == "__main__":
     image_url = 'https://storage.googleapis.com/download.tensorflow.org/example_images/YellowLabradorLooking_new.jpg'
     image = Image.open(requests.get(image_url, stream = True).raw)
-    image_label = 'Labrador retriever'
+    image_label = 'Saluki' # model already misclassifies this image becasue of how CW attack needs the image scaled
     
     attack = CarliniWagner_Mobilenetv2(image, image_label)
     
-    fooled = (torch.Tensor(attack.confidence_label_vector - attack.confidence_prediction_vector) == 0).nonzero(as_tuple=True)[0][-1]
+    fooled = (torch.Tensor(attack.confidence_label_vector - attack.confidence_prediction_vector) == 0).nonzero(as_tuple=True)[0][0]
     not_top_5 = (torch.Tensor(attack.confidence_label_vector - attack.confidence_top5_vector) < 0).nonzero(as_tuple=True)[0][0]
     
     attack.plot_image(attack.image, 'Original Image')
@@ -205,16 +225,18 @@ if __name__ == "__main__":
     plt.ylabel('Confidence')
     plt.xlabel('Itterations')
     
-    plt.plot(torch.linspace(0, attack.itterations, attack.itterations + 1), attack.confidence_prediction_vector.detach(), label = 'Prediction Confidence')
-    plt.plot(torch.linspace(0, attack.itterations, attack.itterations + 1), attack.confidence_top5_vector.detach(), label = 'Top 5 Confidence')
-    plt.plot(torch.linspace(0, attack.itterations, attack.itterations + 1), attack.confidence_label_vector.detach(), label = 'Labeled Class Confidence')
+    plt.plot(attack.itterations_vector, attack.confidence_prediction_vector.detach(), label = 'Prediction Confidence')
+    plt.plot(attack.itterations_vector, attack.confidence_top5_vector.detach(), label = 'Top 5 Confidence')
+    plt.plot(attack.itterations_vector, attack.confidence_label_vector.detach(), label = 'Labeled Class Confidence')
     plt.scatter([fooled, not_top_5], [attack.confidence_label_vector.detach()[fooled], attack.confidence_label_vector.detach()[not_top_5]], color = 'red')
+    plt.legend(loc='upper right')
+    plt.show()
     
     target_label = 'hare'
     image_label = 'Labrador retriever'
     hareOfTheDog = CarliniWagner_Mobilenetv2(image, image_label, targeted = True, 
-                                         target = target_label, max_itterations = 50, 
-                                         learning_rate = .01, initial_constant = 0.1)
+                                             target = target_label, binary_search_steps = 1,
+                                             learning_rate = .01, initial_constant = 0.1,)
     
     fooled = (torch.Tensor(hareOfTheDog.confidence_target_vector - hareOfTheDog.confidence_prediction_vector) == 0).nonzero(as_tuple=True)[0][0]
     

@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 
 class DeepFool_Mobilenetv2(Attack):
     
-    def __init__(self, image, label, itterations = 50, overshoot = .0001):
+    def __init__(self, image, label, itterations = 51, overshoot = .0001):
         super().__init__(image, label)
         
         # attack hyperparamters 
@@ -27,14 +27,14 @@ class DeepFool_Mobilenetv2(Attack):
         self.overshoot = overshoot
         
         # initialize confidence vectors
-        self.itterations_vector = torch.linspace(0, self.itterations, self.itterations + 1)
-        self.confidence_label_vector = torch.zeros(self.itterations + 1)
-        self.confidence_prediction_vector = torch.zeros(self.itterations + 1)
-        self.confidence_top5_vector = torch.zeros(self.itterations + 1)
+        self.itterations_vector = torch.linspace(0, self.itterations - 1, self.itterations)
+        self.confidence_label_vector = torch.zeros(self.itterations)
+        self.confidence_prediction_vector = torch.zeros(self.itterations)
+        self.confidence_top5_vector = torch.zeros(self.itterations)
         
         # perform attack
         self.deepfool(self.itterations, self.overshoot)
-        self.grad_cam_gif[0].save("DeepFool_grad_cam.gif", save_all = True, 
+        self.grad_cam_gif[0].save("Animations/DeepFool_grad_cam.gif", save_all = True, 
                                   append_images = self.grad_cam_gif[1:], duration=100, loop=0)
         
     def deepfool(self, itterations, overshoot, class_count = 10):    
@@ -66,20 +66,31 @@ class DeepFool_Mobilenetv2(Attack):
         gradient = torch.zeros_like(self.image_tensor) 
         total_perterbations = torch.zeros_like(self.image_tensor)
         
-        perturbed_predictions = self.mobilenetv2.forward(perturbed_image)
-        perturbed_predictions = torch.nn.functional.softmax(perturbed_predictions, dim = 1) 
-        confidences, class_indicies = torch.sort(perturbed_predictions, descending = True)
-
-        self.confidence_prediction_vector[0] = confidences[0, 0]
-        self.confidence_top5_vector[0] = confidences[0, 4]
-        self.confidence_label_vector[0] = perturbed_predictions[0, neighborhood[0]]
-        self.grad_cam_gif.append(self.grad_CAM(perturbed_image))
-        
         for itteration in trange(itterations):
+            perturbed_image = self.image_tensor + (1 + overshoot) * total_perterbations
+            perturbed_image.requires_grad_()
+            perturbed_predictions = self.mobilenetv2.forward(perturbed_image)
+            perturbed_predictions = torch.nn.functional.softmax(perturbed_predictions, dim = 1) 
+            confidences, class_indicies = torch.sort(perturbed_predictions, descending = True)
+
+            # record confidences of various classes            
+            self.confidence_prediction_vector[itteration] = confidences[0, 0]
+            self.confidence_top5_vector[itteration] = confidences[0, 4]
+            self.confidence_label_vector[itteration] = perturbed_predictions[0, neighborhood[0]].max()
+            self.grad_cam_gif.append(self.grad_CAM(perturbed_image))
+
+            # save the least noisy images which are misclassified             
+            if ((class_indicies[0, 0] != neighborhood[0]) & (self.least_noisy_fooling_image == None)):
+                self.set_least_noisy_fooling_image(perturbed_image)
+            
+            if ((confidences[0, 4] > perturbed_predictions[0, neighborhood[0]]) & (self.least_noisy_top5_image == None)):
+                self.set_least_noisy_top5_image(perturbed_image)
+            
             minimum_perturbation = torch.inf
             perturbed_predictions[0, neighborhood[0]].backward(retain_graph = True)
             gradient_datum = perturbed_image.grad.data.detach().clone()
             
+            # approximate class boundaries as linear and find the  closest to the curent state
             for neighbor in range(1, class_count):
                 perturbed_image.grad.zero_()
         
@@ -93,26 +104,10 @@ class DeepFool_Mobilenetv2(Attack):
                 if candidate_perturbation < minimum_perturbation:
                     minimum_perturbation = candidate_perturbation
                     gradient = candidate_gradient
-        
+            
+            # apply perturbations
             incremental_perturbation = (minimum_perturbation + 1e-4) * gradient / torch.linalg.norm(gradient)
             total_perterbations = total_perterbations + incremental_perturbation
-        
-            perturbed_image = self.image_tensor + (1 + overshoot) * total_perterbations
-            perturbed_image.requires_grad_()
-            perturbed_predictions = self.mobilenetv2.forward(perturbed_image)
-            perturbed_predictions = torch.nn.functional.softmax(perturbed_predictions, dim = 1) 
-            confidences, class_indicies = torch.sort(perturbed_predictions, descending = True)
-        
-            self.confidence_prediction_vector[itteration + 1] = confidences[0, 0]
-            self.confidence_top5_vector[itteration + 1] = confidences[0, 4]
-            self.confidence_label_vector[itteration + 1] = perturbed_predictions[0, neighborhood[0]].max()
-            self.grad_cam_gif.append(self.grad_CAM(perturbed_image))
-            
-            if ((class_indicies[0, 0] != neighborhood[0]) & (self.least_noisy_fooling_image == None)):
-                self.set_least_noisy_fooling_image(perturbed_image)
-            
-            if ((confidences[0, 4] > perturbed_predictions[0, neighborhood[0]]) & (self.least_noisy_top5_image == None)):
-                self.set_least_noisy_top5_image(perturbed_image)
             
         total_perterbations = (1 + overshoot) * total_perterbations
 
